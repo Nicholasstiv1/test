@@ -1,0 +1,222 @@
+<div class="container-fluid py-4">
+  <div class="row">
+    <!-- Área do Jogo -->
+    <div class="col-lg-8">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <h3 class="mb-0">🚀 Space Shooter</h3>
+          <div>
+            <span class="badge bg-primary me-2">Score: <span id="currentScore">0</span></span>
+            <span class="badge bg-success">Vidas: <span id="currentLives">3</span></span>
+          </div>
+        </div>
+        <div class="card-body p-0">
+          <!-- Canvas do jogo -->
+          <canvas id="gameCanvas" width="800" height="600" style="border: 1px solid #ccc; display: block; margin: 0 auto;"></canvas>
+          
+          <!-- Controles do jogo -->
+          <div class="text-center p-3">
+            <button id="startGameBtn" class="btn btn-success me-2">Iniciar Jogo</button>
+            <button id="pauseGameBtn" class="btn btn-warning me-2" disabled>Pausar</button>
+            <button id="restartGameBtn" class="btn btn-danger" disabled>Reiniciar</button>
+          </div>
+          
+          <!-- Instruções -->
+          <div class="text-center text-muted p-3">
+            <small>
+              <strong>Controles:</strong> Use as setas ← → para mover, ESPAÇO para atirar, P para pausar
+            </small>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sidebar com Estatísticas -->
+    <div class="col-lg-4">
+      <!-- Seus Melhores Scores -->
+      <div class="card mb-4">
+        <div class="card-header">
+          <h5 class="mb-0">🏆 Seus Melhores Scores</h5>
+        </div>
+        <div class="card-body">
+          {{
+#if
+ userScores.length}}
+            <div class="list-group list-group-flush">
+              {{
+#each
+ userScores}}
+                <div class="list-group-item d-flex justify-content-between align-items-center px-0">
+                  <span>{{@index}}.º lugar</span>
+                  <strong>{{this.score}} pontos</strong>
+                </div>
+              {{
+/each
+}}
+            </div>
+          {{else}}
+            <p class="text-muted mb-0">Nenhum score registrado ainda. Jogue para aparecer aqui!</p>
+          {{
+/if
+}}
+        </div>
+      </div>
+
+      <!-- Leaderboard Global -->
+      <div class="card">
+        <div class="card-header">
+          <h5 class="mb-0">🌟 Ranking Global</h5>
+        </div>
+        <div class="card-body">
+          <div id="leaderboard">
+            <div class="text-center">
+              <div class="spinner-border spinner-border-sm" role="status">
+                <span class="visually-hidden">Carregando...</span>
+              </div>
+              <p class="text-muted mt-2">Carregando ranking...</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal de Game Over -->
+<div class="modal fade" id="gameOverModal" tabindex="-1" aria-labelledby="gameOverModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="gameOverModalLabel">💀 Game Over</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body text-center">
+        <p class="lead">Seu score final foi:</p>
+        <h2 class="text-primary mb-3" id="finalScore">0</h2>
+        <div id="scoreStatus" class="alert alert-info">
+          <div class="spinner-border spinner-border-sm me-2" role="status">
+            <span class="visually-hidden">Salvando...</span>
+          </div>
+          Salvando seu score...
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+        <button type="button" class="btn btn-primary" onclick="restartGame()">Jogar Novamente</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Aqui você colocará sua lógica do jogo
+// O jogo deve chamar a função saveScoreToServer() quando terminar
+
+// Função para salvar score no servidor
+async function saveScoreToServer(score) {
+  try {
+    const response = await fetch('/api/game/save-score', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ score }),
+    });
+
+    const data = await response.json();
+    
+    if (data.success) {
+      document.getElementById('scoreStatus').innerHTML = 
+        `<div class="alert alert-success">✅ Score salvo com sucesso!</div>`;
+      
+      // Atualizar leaderboard
+      loadLeaderboard();
+      
+      // Recarregar a página após alguns segundos para atualizar os melhores scores
+      setTimeout(() => {
+        window.location.reload();
+      }, 2000);
+    } else {
+      document.getElementById('scoreStatus').innerHTML = 
+        `<div class="alert alert-danger">❌ Erro ao salvar score: ${data.error}</div>`;
+    }
+  } catch (error) {
+    console.error('Erro ao salvar score:', error);
+    document.getElementById('scoreStatus').innerHTML = 
+      `<div class="alert alert-danger">❌ Erro de conexão ao salvar score</div>`;
+  }
+}
+
+// Função para carregar o leaderboard
+async function loadLeaderboard() {
+  try {
+    const response = await fetch('/api/game/leaderboard');
+    const leaderboard = await response.json();
+    
+    const leaderboardElement = document.getElementById('leaderboard');
+    
+    if (leaderboard.length > 0) {
+      let html = '<div class="list-group list-group-flush">';
+      leaderboard.forEach((entry, index) => {
+        const medalIcon = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '🏅';
+        html += `
+          <div class="list-group-item d-flex justify-content-between align-items-center px-0">
+            <span>${medalIcon} ${entry.user.fullName}</span>
+            <strong>${entry.score} pontos</strong>
+          </div>
+        `;
+      });
+      html += '</div>';
+      leaderboardElement.innerHTML = html;
+    } else {
+      leaderboardElement.innerHTML = '<p class="text-muted mb-0">Nenhum score registrado ainda.</p>';
+    }
+  } catch (error) {
+    console.error('Erro ao carregar leaderboard:', error);
+    document.getElementById('leaderboard').innerHTML = 
+      '<p class="text-danger mb-0">Erro ao carregar ranking.</p>';
+  }
+}
+
+// Função chamada quando o jogo termina
+function gameOver(finalScore) {
+  document.getElementById('finalScore').textContent = finalScore;
+  
+  // Resetar status de salvamento
+  document.getElementById('scoreStatus').innerHTML = `
+    <div class="spinner-border spinner-border-sm me-2" role="status">
+      <span class="visually-hidden">Salvando...</span>
+    </div>
+    Salvando seu score...
+  `;
+  
+  // Mostrar modal
+  const modal = new bootstrap.Modal(document.getElementById('gameOverModal'));
+  modal.show();
+  
+  // Salvar score
+  saveScoreToServer(finalScore);
+}
+
+// Função para reiniciar o jogo
+function restartGame() {
+  // Fechar modal
+  const modal = bootstrap.Modal.getInstance(document.getElementById('gameOverModal'));
+  if (modal) {
+    modal.hide();
+  }
+  
+  // Aqui você deve implementar a lógica para reiniciar seu jogo
+  // Por exemplo: initGame() ou similar
+  console.log('Reiniciando jogo...');
+}
+
+// Carregar leaderboard quando a página carrega
+document.addEventListener('DOMContentLoaded', function() {
+  loadLeaderboard();
+  
+  // Aqui você deve inicializar seu jogo
+  // Por exemplo: initGame()
+  console.log('Página carregada - inicializar jogo aqui');
+});
+</script>
