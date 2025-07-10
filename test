@@ -1,0 +1,494 @@
+import random
+import math
+import statistics
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+import numpy as np
+
+@dataclass
+class TraceEntry:
+    """Representa uma entrada do arquivo de trace"""
+    node_id: str
+    date: str
+    time: str
+    latitude: float
+    longitude: float
+    battery_level: int
+    internal_memory: int
+    external_memory: int
+    wifi_status: str
+    bluetooth_status: str
+    connection_type: str
+    p2p_support: str
+
+@dataclass
+class Message:
+    """Representa uma mensagem na rede"""
+    id: str
+    source: str
+    destination: str
+    creation_time: float
+    delivery_time: Optional[float] = None
+    hop_count: int = 0
+    is_priority: bool = False
+    size: int = 1024  # tamanho em bytes
+
+class Node:
+    """Representa um nó na rede oportunista"""
+    def __init__(self, node_id: str, latitude: float, longitude: float, battery_level: int):
+        self.node_id = node_id
+        self.latitude = latitude
+        self.longitude = longitude
+        self.battery_level = battery_level
+        self.messages = []
+        self.buffer_size = 10 * 1024 * 1024  # 10MB buffer
+        self.current_buffer_usage = 0
+        
+    def is_selfish(self, case: int, message: Message) -> bool:
+        """Determina se o nó é egoísta baseado no caso de simulação"""
+        if case == 1:  # Caso I: nós 100% não egoístas
+            return False
+        elif case == 2:  # Caso II: egoístas dependendo da bateria
+            return self.battery_level < 20  # egoísta se bateria < 20%
+        elif case == 3:  # Caso III: egoístas dependendo da bateria, mas com prioridade
+            if message.is_priority:
+                return False  # nunca egoísta para mensagens prioritárias
+            return self.battery_level < 20
+        return False
+    
+    def can_store_message(self, message: Message) -> bool:
+        """Verifica se o nó pode armazenar a mensagem"""
+        return (self.current_buffer_usage + message.size) <= self.buffer_size
+    
+    def add_message(self, message: Message):
+        """Adiciona mensagem ao buffer do nó"""
+        if self.can_store_message(message):
+            self.messages.append(message)
+            self.current_buffer_usage += message.size
+            return True
+        return False
+    
+    def remove_message(self, message: Message):
+        """Remove mensagem do buffer do nó"""
+        if message in self.messages:
+            self.messages.remove(message)
+            self.current_buffer_usage -= message.size
+
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calcula a distância entre dois pontos usando a fórmula de Haversine"""
+    R = 6371000  # raio da Terra em metros
+    
+    lat1_rad = math.radians(lat1)
+    lon1_rad = math.radians(lon1)
+    lat2_rad = math.radians(lat2)
+    lon2_rad = math.radians(lon2)
+    
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+    
+    a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    
+    return R * c
+
+def parse_trace_line(line: str) -> TraceEntry:
+    """Converte uma linha do trace em um objeto TraceEntry"""
+    parts = line.strip().split(';')
+    
+    # Ignora informações de roteadores (último campo contém os roteadores)
+    return TraceEntry(
+        node_id=parts[0],
+        date=parts[1],
+        time=parts[2],
+        latitude=float(parts[3].split(',')[0]),
+        longitude=float(parts[3].split(',')[1]),
+        battery_level=int(parts[4]),
+        internal_memory=int(parts[5]),
+        external_memory=int(parts[6]),
+        wifi_status=parts[7],
+        bluetooth_status=parts[8],
+        connection_type=parts[9],
+        p2p_support=parts[10]
+        # parts[11] contém os roteadores, mas não usamos na simulação
+    )
+
+def load_dataset(filename: str = "dataset.txt") -> List[TraceEntry]:
+    """Carrega dados do arquivo de trace real"""
+    traces = []
+    
+    try:
+        with open(filename, 'r', encoding='utf-8') as file:
+            for line_num, line in enumerate(file, 1):
+                line = line.strip()
+                if not line or line.startswith('#'):  # Ignora linhas vazias e comentários
+                    continue
+                
+                try:
+                    trace = parse_trace_line(line)
+                    traces.append(trace)
+                except Exception as e:
+                    print(f"Erro ao processar linha {line_num}: {e}")
+                    print(f"Linha problemática: {line}")
+                    continue
+        
+        print(f"Carregadas {len(traces)} entradas do arquivo {filename}")
+        return traces
+        
+    except FileNotFoundError:
+        print(f"Arquivo {filename} não encontrado!")
+        print("Certifique-se de que o arquivo dataset.txt está no mesmo diretório do programa.")
+        return []
+    except Exception as e:
+        print(f"Erro ao ler arquivo {filename}: {e}")
+        return []
+
+class OpportunisticNetworkSimulator:
+    """Simulador de rede oportunista"""
+    
+    def __init__(self, min_distance: float = 500.0, coverage_radius: float = 10.0):
+        self.min_distance = min_distance
+        self.coverage_radius = coverage_radius
+        self.nodes = {}
+        self.node_positions = {}  # Armazena múltiplas posições por nó
+        self.messages = []
+        self.delivered_messages = []
+        
+    def load_trace_data(self, traces: List[TraceEntry]):
+        """Carrega dados do trace e cria nós com histórico de posições"""
+        for trace in traces:
+            if trace.node_id not in self.nodes:
+                self.nodes[trace.node_id] = Node(
+                    trace.node_id,
+                    trace.latitude,
+                    trace.longitude,
+                    trace.battery_level
+                )
+                self.node_positions[trace.node_id] = []
+            
+            # Armazena posição com timestamp
+            self.node_positions[trace.node_id].append({
+                'latitude': trace.latitude,
+                'longitude': trace.longitude,
+                'battery_level': trace.battery_level,
+                'timestamp': f"{trace.date} {trace.time}"
+            })
+        
+        # Atualiza nós com posição mais recente
+        for node_id, positions in self.node_positions.items():
+            if positions:
+                latest_pos = positions[-1]  # Última posição registrada
+                self.nodes[node_id].latitude = latest_pos['latitude']
+                self.nodes[node_id].longitude = latest_pos['longitude']
+                self.nodes[node_id].battery_level = latest_pos['battery_level']
+    
+    def get_random_node_position(self, node_id: str) -> Tuple[float, float, int]:
+        """Retorna uma posição aleatória do histórico do nó"""
+        if node_id in self.node_positions and self.node_positions[node_id]:
+            pos = random.choice(self.node_positions[node_id])
+            return pos['latitude'], pos['longitude'], pos['battery_level']
+        return self.nodes[node_id].latitude, self.nodes[node_id].longitude, self.nodes[node_id].battery_level
+    
+    def select_communication_pair(self) -> Tuple[str, str]:
+        """Seleciona dois nós para comunicação com distância mínima D"""
+        node_ids = list(self.nodes.keys())
+        max_attempts = 1000
+        
+        for _ in range(max_attempts):
+            source_id = random.choice(node_ids)
+            dest_id = random.choice(node_ids)
+            
+            if source_id != dest_id:
+                # Usa posições aleatórias do histórico
+                source_lat, source_lon, _ = self.get_random_node_position(source_id)
+                dest_lat, dest_lon, _ = self.get_random_node_position(dest_id)
+                
+                distance = haversine_distance(source_lat, source_lon, dest_lat, dest_lon)
+                
+                if distance >= self.min_distance:
+                    return source_id, dest_id
+        
+        # Se não encontrar par com distância mínima, retorna qualquer par
+        source_id = random.choice(node_ids)
+        dest_id = random.choice([n for n in node_ids if n != source_id])
+        return source_id, dest_id
+    
+    def find_neighbors(self, node_id: str) -> List[str]:
+        """Encontra vizinhos dentro do raio de cobertura"""
+        neighbors = []
+        source_lat, source_lon, _ = self.get_random_node_position(node_id)
+        
+        for other_id in self.nodes.keys():
+            if other_id != node_id:
+                other_lat, other_lon, _ = self.get_random_node_position(other_id)
+                distance = haversine_distance(source_lat, source_lon, other_lat, other_lon)
+                
+                if distance <= self.coverage_radius:
+                    neighbors.append(other_id)
+        
+        return neighbors
+    
+    def simulate_message_routing(self, message: Message, case: int, max_hops: int = 20) -> bool:
+        """Simula o roteamento de uma mensagem"""
+        current_node_id = message.source
+        visited_nodes = set([current_node_id])
+        
+        # Atualiza posição e bateria do nó atual
+        lat, lon, battery = self.get_random_node_position(current_node_id)
+        self.nodes[current_node_id].latitude = lat
+        self.nodes[current_node_id].longitude = lon
+        self.nodes[current_node_id].battery_level = battery
+        
+        # Adiciona mensagem ao nó fonte
+        if not self.nodes[current_node_id].add_message(message):
+            return False
+        
+        for hop in range(max_hops):
+            if current_node_id == message.destination:
+                message.delivery_time = hop
+                message.hop_count = hop
+                self.delivered_messages.append(message)
+                return True
+            
+            # Encontra vizinhos
+            neighbors = self.find_neighbors(current_node_id)
+            available_neighbors = [n for n in neighbors if n not in visited_nodes]
+            
+            if not available_neighbors:
+                # Tenta encontrar qualquer nó próximo não visitado
+                all_neighbors = []
+                current_lat, current_lon, _ = self.get_random_node_position(current_node_id)
+                
+                for other_id in self.nodes.keys():
+                    if other_id not in visited_nodes:
+                        other_lat, other_lon, _ = self.get_random_node_position(other_id)
+                        distance = haversine_distance(current_lat, current_lon, other_lat, other_lon)
+                        
+                        if distance <= self.coverage_radius * 2:  # Raio expandido
+                            all_neighbors.append(other_id)
+                
+                if not all_neighbors:
+                    break
+                
+                available_neighbors = all_neighbors
+            
+            # Tenta encontrar um nó cooperativo
+            next_node_id = None
+            random.shuffle(available_neighbors)
+            
+            for candidate_id in available_neighbors:
+                # Atualiza posição e bateria do candidato
+                lat, lon, battery = self.get_random_node_position(candidate_id)
+                self.nodes[candidate_id].latitude = lat
+                self.nodes[candidate_id].longitude = lon
+                self.nodes[candidate_id].battery_level = battery
+                
+                candidate_node = self.nodes[candidate_id]
+                
+                # Verifica se o nó é egoísta
+                if candidate_node.is_selfish(case, message):
+                    continue
+                
+                # Verifica se pode armazenar a mensagem
+                if not candidate_node.can_store_message(message):
+                    continue
+                
+                next_node_id = candidate_id
+                break
+            
+            if next_node_id is None:
+                break  # Não encontrou nó cooperativo
+            
+            # Transfere mensagem
+            self.nodes[current_node_id].remove_message(message)
+            self.nodes[next_node_id].add_message(message)
+            
+            current_node_id = next_node_id
+            visited_nodes.add(current_node_id)
+        
+        return False
+    
+    def run_simulation(self, case: int, num_messages: int = 100) -> dict:
+        """Executa uma simulação completa"""
+        self.messages = []
+        self.delivered_messages = []
+        
+        # Limpa buffers dos nós
+        for node in self.nodes.values():
+            node.messages = []
+            node.current_buffer_usage = 0
+        
+        # Gera mensagens
+        for i in range(num_messages):
+            source_id, dest_id = self.select_communication_pair()
+            
+            message = Message(
+                id=f"msg_{i}",
+                source=source_id,
+                destination=dest_id,
+                creation_time=i,
+                is_priority=random.choice([True, False]) if case == 3 else False,
+                size=random.randint(512, 2048)
+            )
+            
+            self.messages.append(message)
+            
+            # Simula roteamento
+            success = self.simulate_message_routing(message, case)
+            
+            # Debug: imprime algumas informações
+            if i < 5:  # Primeiras 5 mensagens
+                neighbors = self.find_neighbors(source_id)
+                print(f"Debug: Msg {i} - Source: {source_id}, Dest: {dest_id}, Neighbors: {len(neighbors)}, Success: {success}")
+        
+        # Calcula métricas
+        delivery_rate = (len(self.delivered_messages) / len(self.messages)) * 100
+        
+        if self.delivered_messages:
+            avg_latency = statistics.mean([msg.delivery_time for msg in self.delivered_messages])
+            avg_hops = statistics.mean([msg.hop_count for msg in self.delivered_messages])
+        else:
+            avg_latency = 0
+            avg_hops = 0
+        
+        return {
+            'delivery_rate': delivery_rate,
+            'avg_latency': avg_latency,
+            'avg_hops': avg_hops,
+            'total_messages': len(self.messages),
+            'delivered_messages': len(self.delivered_messages)
+        }
+
+def main():
+    """Função principal para executar as simulações"""
+    print("=== Simulação de Rede Oportunista ===\n")
+    
+    # Carrega dados do arquivo dataset.txt
+    print("Carregando dados do arquivo dataset.txt...")
+    traces = load_dataset("dataset.txt")
+    
+    if not traces:
+        print("Não foi possível carregar dados do arquivo. Encerrando simulação.")
+        return
+    
+    # Inicializa simulador
+    simulator = OpportunisticNetworkSimulator(min_distance=500.0, coverage_radius=50.0)  # Aumentado raio
+    simulator.load_trace_data(traces)
+    
+    print(f"Carregados {len(simulator.nodes)} nós únicos")
+    print(f"Total de entradas de trace: {len(traces)}")
+    print(f"Distância mínima: {simulator.min_distance}m")
+    print(f"Raio de cobertura: {simulator.coverage_radius}m")
+    
+    # Mostra estatísticas das posições
+    print("\n=== ANÁLISE DE MOBILIDADE ===")
+    for node_id, positions in list(simulator.node_positions.items())[:3]:  # Primeiros 3 nós
+        print(f"Nó {node_id}: {len(positions)} posições registradas")
+        if len(positions) > 1:
+            first_pos = positions[0]
+            last_pos = positions[-1]
+            distance = haversine_distance(
+                first_pos['latitude'], first_pos['longitude'],
+                last_pos['latitude'], last_pos['longitude']
+            )
+            print(f"  Distância entre primeira e última posição: {distance:.2f}m")
+    
+    # Teste de conectividade
+    print("\n=== TESTE DE CONECTIVIDADE ===")
+    total_neighbors = 0
+    for node_id in list(simulator.nodes.keys())[:5]:  # Testa 5 nós
+        neighbors = simulator.find_neighbors(node_id)
+        total_neighbors += len(neighbors)
+        print(f"Nó {node_id}: {len(neighbors)} vizinhos")
+    
+    avg_neighbors = total_neighbors / min(5, len(simulator.nodes))
+    print(f"Média de vizinhos por nó: {avg_neighbors:.2f}")
+    
+    if avg_neighbors == 0:
+        print("AVISO: Nenhum nó tem vizinhos! Ajustando raio de cobertura...")
+        simulator.coverage_radius = 100.0  # Aumenta ainda mais
+        print(f"Novo raio de cobertura: {simulator.coverage_radius}m")
+    
+    print()
+    
+    # Executa simulações para cada caso
+    cases = [
+        (1, "Nós 100% não egoístas"),
+        (2, "Nós egoístas dependendo do nível de bateria"),
+        (3, "Nós egoístas dependendo da bateria, mas com mensagens prioritárias")
+    ]
+    
+    num_runs = 10  # Reduzido para debug
+    results = {}
+    
+    for case_num, case_desc in cases:
+        print(f"=== CASO {case_num}: {case_desc} ===")
+        
+        case_results = []
+        
+        for run in range(num_runs):
+            print(f"Executando simulação {run + 1}/{num_runs}...")
+            
+            result = simulator.run_simulation(case_num, num_messages=20)  # Reduzido para debug
+            case_results.append(result)
+            
+            print(f"  Taxa de entrega: {result['delivery_rate']:.1f}% ({result['delivered_messages']}/{result['total_messages']})")
+            
+            if run == 0:  # Primeira execução de cada caso
+                print("  Debug da primeira execução concluído")
+        
+        # Calcula estatísticas médias
+        avg_delivery_rate = statistics.mean([r['delivery_rate'] for r in case_results])
+        avg_latency = statistics.mean([r['avg_latency'] for r in case_results])
+        avg_hops = statistics.mean([r['avg_hops'] for r in case_results])
+        
+        # Calcula desvio padrão
+        std_delivery_rate = statistics.stdev([r['delivery_rate'] for r in case_results]) if len(case_results) > 1 else 0
+        std_latency = statistics.stdev([r['avg_latency'] for r in case_results]) if len(case_results) > 1 else 0
+        std_hops = statistics.stdev([r['avg_hops'] for r in case_results]) if len(case_results) > 1 else 0
+        
+        results[case_num] = {
+            'delivery_rate': avg_delivery_rate,
+            'latency': avg_latency,
+            'hops': avg_hops,
+            'std_delivery_rate': std_delivery_rate,
+            'std_latency': std_latency,
+            'std_hops': std_hops
+        }
+        
+        print(f"\n--- Resultados médios do Caso {case_num} ---")
+        print(f"Taxa de entrega: {avg_delivery_rate:.2f}% (±{std_delivery_rate:.2f})")
+        print(f"Latência média: {avg_latency:.2f} hops (±{std_latency:.2f})")
+        print(f"Número médio de saltos: {avg_hops:.2f} (±{std_hops:.2f})")
+        print()
+    
+    # Comparação dos resultados
+    print("=== COMPARAÇÃO DOS RESULTADOS ===")
+    print("Caso | Taxa Entrega (±std) | Latência (±std) | Saltos (±std)")
+    print("-" * 65)
+    for case_num in [1, 2, 3]:
+        r = results[case_num]
+        print(f"  {case_num}  |  {r['delivery_rate']:6.2f}% (±{r['std_delivery_rate']:4.2f}) |  {r['latency']:5.2f} (±{r['std_latency']:4.2f}) | {r['hops']:5.2f} (±{r['std_hops']:4.2f})")
+    
+    # Mostra estatísticas do dataset
+    print(f"\n=== ESTATÍSTICAS DO DATASET ===")
+    unique_nodes = len(simulator.nodes)
+    battery_levels = [node.battery_level for node in simulator.nodes.values()]
+    
+    print(f"Nós únicos no dataset: {unique_nodes}")
+    print(f"Nível de bateria médio: {statistics.mean(battery_levels):.1f}%")
+    print(f"Nível de bateria mínimo: {min(battery_levels)}%")
+    print(f"Nível de bateria máximo: {max(battery_levels)}%")
+    
+    # Estatísticas de mobilidade
+    total_positions = sum(len(positions) for positions in simulator.node_positions.values())
+    avg_positions_per_node = total_positions / len(simulator.nodes)
+    print(f"Média de posições por nó: {avg_positions_per_node:.1f}")
+    
+    print("\nDica: Se as taxas de entrega ainda estiverem baixas, considere:")
+    print("- Aumentar o raio de cobertura")
+    print("- Reduzir a distância mínima entre nós")
+    print("- Verificar se os dados de localização estão corretos")
+
+if __name__ == "__main__":
+    main()
